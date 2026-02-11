@@ -1,0 +1,24 @@
+# Secrets
+.env
+.env.local
+
+# State directories (persisted on Railway volume)
+.copy_trading/
+.monitor/
+.api_cache/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Logs
+*.log
+server.log
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store

@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Polymarket Trading Bot</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="styles.css?v=29">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+    <div class="app">
+        <!-- Sidebar -->
+        <nav class="sidebar">
+            <div class="logo">
+                <span class="logo-icon">P</span>
+                <span class="logo-text">Polymarket Bot</span>
+            </div>
+            <ul class="nav-items">
+                <li class="nav-item active" data-view="dashboard">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <rect x="3" y="3" width="7" height="7"></rect>
+                        <rect x="14" y="3" width="7" height="7"></rect>
+                        <rect x="14" y="14" width="7" height="7"></rect>
+                        <rect x="3" y="14" width="7" height="7"></rect>
+                    </svg>
+                    Dashboard
+                </li>
+                <li class="nav-item" data-view="opportunities">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <polyline points="22 12 18 12 15 21 9 3 6 12 2 12"></polyline>
+                    </svg>
+                    Opportunities
+                </li>
+                <li class="nav-item" data-view="positions">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M12 2v20M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path>
+                    </svg>
+                    Positions
+                </li>
+                <li class="nav-item" data-view="monitor">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"></path>
+                    </svg>
+                    Profit Monitor
+                </li>
+                <li class="nav-item" data-view="copyTrading">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2"></path>
+                        <circle cx="9" cy="7" r="4"></circle>
+                        <path d="M23 21v-2a4 4 0 0 0-3-3.87"></path>
+                        <path d="M16 3.13a4 4 0 0 1 0 7.75"></path>
+                    </svg>
+                    Copy Trading
+                </li>
+                <li class="nav-item" data-view="search">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="11" cy="11" r="8"></circle>
+                        <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                    </svg>
+                    Search Markets
+                </li>
+                <li class="nav-item" data-view="logs">
+                    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path>
+                        <polyline points="14 2 14 8 20 8"></polyline>
+                        <line x1="16" y1="13" x2="8" y2="13"></line>
+                        <line x1="16" y1="17" x2="8" y2="17"></line>
+                    </svg>
+                    Logs
+                </li>
+            </ul>
+            <div class="sidebar-footer">
+                <div class="monitor-status" id="copyTraderStatusIndicator" style="margin-bottom: 8px;">
+                    <span class="status-dot"></span>
+                    <span class="status-text">Copy Trader: Checking...</span>
+                </div>
+                <div class="monitor-status" id="monitorStatusIndicator">
+                    <span class="status-dot"></span>
+                    <span class="status-text">Monitor: Checking...</span>
+                </div>
+            </div>
+        </nav>
+
+        <!-- Main Content -->
+        <main class="main-content">
+            <!-- Dashboard View -->
+            <div class="view active" id="dashboardView">
+                <div class="view-header">
+                    <h1>Dashboard</h1>
+                    <p class="subtitle">Overview of your trading activity</p>
+                </div>
+                <div class="stats-grid stats-grid-5">
+                    <div class="stat-card">
+                        <div class="stat-label">Account Total</div>
+                        <div class="stat-value" id="accountTotal">-</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Cash Available</div>
+                        <div class="stat-value" id="cashAvailable">-</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Portfolio Value</div>
+                        <div class="stat-value" id="portfolioValue">-</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Total P&L</div>
+                        <div class="stat-value" id="totalPnl">-</div>
+                    </div>
+                    <div class="stat-card">
+                        <div class="stat-label">Positions</div>
+                        <div class="stat-value" id="totalPositions">-</div>
+                    </div>
+                </div>
+                <div class="section">
+                    <h2>P&L Over Time</h2>
+                    <div class="chart-container">
+                        <canvas id="pnlChart"></canvas>
+                    </div>
+                </div>
+                <div class="section">
+                    <h2>Quick Actions</h2>
+                    <div class="quick-actions">
+                        <button class="btn btn-primary" onclick="showView('opportunities')">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <circle cx="11" cy="11" r="8"></circle>
+                                <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                            </svg>
+                            Scan Opportunities
+                        </button>
+                        <button class="btn btn-secondary" onclick="addAllToPM()">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <path d="M12 5v14M5 12h14"></path>
+                            </svg>
+                            Add All to PM
+                        </button>
+                        <button class="btn btn-danger" onclick="sellAllPositions()">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <polyline points="3 6 5 6 21 6"></polyline>
+                                <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                            </svg>
+                            Sell All
+                        </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Opportunities View -->
+            <div class="view" id="opportunitiesView">
+                <div class="view-header">
+                    <div class="header-row">
+                        <div>
+                            <h1>Opportunities</h1>
+                            <p class="subtitle">Find profitable trading opportunities</p>
+                        </div>
+                        <div class="api-status" id="apiStatus" style="display: none;">
+                            <span class="api-status-badge blocked">API Blocked</span>
+                            <button class="btn btn-small btn-warning" onclick="resetApiGuard()">Reset API</button>
+                        </div>
+                    </div>
+                </div>
+                <div class="controls-bar">
+                    <div class="control-group">
+                        <label>Show Top</label>
+                        <select id="topCount" class="select">
+                            <option value="5" selected>5</option>
+                            <option value="10">10</option>
+                            <option value="20">20</option>
+                        </select>
+                    </div>
+                    <div class="control-group">
+                        <label>Risk Mode</label>
+                        <select id="riskMode" class="select">
+                            <option value="conservative">Conservative</option>
+                            <option value="moderate" selected>Moderate</option>
+                            <option value="aggressive">Aggressive</option>
+                            <option value="speculative">Speculative</option>
+                        </select>
+                    </div>
+                    <div class="control-group">
+                        <label>Max Hours</label>
+                        <input type="number" id="maxHours" class="input" value="24" min="1" max="336">
+                    </div>
+                    <div class="control-group">
+                        <label>Max AI Analysis</label>
+                        <input type="number" id="maxAiAnalysis" class="input" value="5" min="1" max="50" title="Limit how many markets get Claude AI analysis (reduces API costs)">
+                    </div>
+                    <button class="btn btn-primary" onclick="scanOpportunities(false)">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="11" cy="11" r="8"></circle>
+                            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                        </svg>
+                        Quick Scan
+                    </button>
+                    <button class="btn btn-secondary deep-scan-btn" onclick="scanOpportunities(true)" title="Uses Claude with web search for comprehensive research">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="12" cy="12" r="10"></circle>
+                            <path d="M12 16v-4"></path>
+                            <path d="M12 8h.01"></path>
+                        </svg>
+                        Deep Research Scan
+                    </button>
+                </div>
+                <div class="history-bar">
+                    <div class="history-bar-label">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="12" cy="12" r="10"></circle>
+                            <polyline points="12 6 12 12 16 14"></polyline>
+                        </svg>
+                        <span>Scan History</span>
+                    </div>
+                    <select id="scanHistory" class="select" onchange="loadHistoricalScan()">
+                        <option value="">-- Current Results --</option>
+                    </select>
+                    <button class="btn btn-outline btn-small" onclick="refreshScanHistory()" title="Refresh history list">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14">
+                            <polyline points="23 4 23 10 17 10"></polyline>
+                            <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+                        </svg>
+                    </button>
+                    <span class="history-hint" id="historyHint">No saved scans</span>
+                </div>
+                <div class="opportunities-list" id="opportunitiesList">
+                    <div class="empty-state">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="11" cy="11" r="8"></circle>
+                            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                        </svg>
+                        <p>Click "Scan Now" to find opportunities</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Positions View -->
+            <div class="view" id="positionsView">
+                <div class="view-header">
+                    <div class="header-row">
+                        <div>
+                            <h1>Positions</h1>
+                            <p class="subtitle">Your current open positions</p>
+                        </div>
+                        <div class="header-actions">
+                            <button class="btn btn-secondary" id="toggleMonitorBtnPositions" onclick="toggleMonitor()">
+                                Start Monitor
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                <div class="positions-list" id="positionsList">
+                    <div class="loading">Loading positions...</div>
+                </div>
+            </div>
+
+            <!-- Monitor View -->
+            <div class="view" id="monitorView">
+                <div class="view-header">
+                    <div class="header-row">
+                        <div>
+                            <h1>Profit Monitor</h1>
+                            <p class="subtitle">Manage take-profit and stop-loss configurations</p>
+                        </div>
+                        <div class="header-actions">
+                            <button class="btn btn-secondary" id="toggleMonitorBtn" onclick="toggleMonitor()">
+                                Start Monitor
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                <div class="controls-bar">
+                    <button class="btn btn-outline" onclick="showAddAllModal()">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M12 5v14M5 12h14"></path>
+                        </svg>
+                        Add All Positions
+                    </button>
+                    <button class="btn btn-outline btn-danger" onclick="deleteAllConfigs()">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="3 6 5 6 21 6"></polyline>
+                            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                        </svg>
+                        Delete All
+                    </button>
+                </div>
+                <div class="pm-configs-list" id="pmConfigsList">
+                    <div class="loading">Loading configurations...</div>
+                </div>
+            </div>
+
+            <!-- Copy Trading View -->
+            <div class="view" id="copyTradingView">
+                <div class="view-header">
+                    <div class="header-row">
+                        <div>
+                            <h1>Copy Trading</h1>
+                            <p class="subtitle">Follow traders and automatically replicate their trades</p>
+                        </div>
+                        <div class="header-actions">
+                            <button class="btn btn-secondary" id="toggleCopyTraderBtn" onclick="toggleCopyTrader()">
+                                Start Copy Trader
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Add Trader Form -->
+                <div class="controls-bar ct-add-form">
+                    <div class="control-group" style="flex: 1;">
+                        <label>Polymarket Handle</label>
+                        <input type="text" id="ctHandle" class="input" placeholder="@username" style="min-width: 200px;">
+                    </div>
+                    <div class="control-group">
+                        <label>Max Amount ($)</label>
+                        <input type="number" id="ctMaxAmount" class="input" value="5" min="0.5" step="0.5" style="min-width: 100px;">
+                    </div>
+                    <div class="control-group">
+                        <label>Extra %</label>
+                        <input type="number" id="ctExtraPct" class="input" value="10" min="0" max="100" step="1" style="min-width: 80px;">
+                    </div>
+                    <button class="btn btn-primary" onclick="addCopyTrader()">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M12 5v14M5 12h14"></path>
+                        </svg>
+                        Follow Trader
+                    </button>
+                </div>
+
+                <!-- Followed Traders List -->
+                <div class="ct-configs-list" id="ctConfigsList">
+                    <div class="loading">Loading followed traders...</div>
+                </div>
+
+                <!-- Detected & Executed Trades Side by Side -->
+                <div class="ct-trades-grid">
+                    <div class="ct-trades-panel">
+                        <h3 class="ct-trades-title">Detected Trades <span class="ct-trades-timestamp" id="ctDetectedTimestamp"></span></h3>
+                        <div class="ct-trades-table-wrap" id="ctDetectedTrades">
+                            <div class="empty-state"><p>No detected trades yet</p></div>
+                        </div>
+                    </div>
+                    <div class="ct-trades-panel">
+                        <h3 class="ct-trades-title">Executed Trades <span class="ct-trades-timestamp" id="ctExecutedTimestamp"></span></h3>
+                        <div class="ct-trades-table-wrap" id="ctExecutedTrades">
+                            <div class="empty-state"><p>No executed trades yet</p></div>
+                        </div>
+                    </div>
+                </div>
+
+                <!-- Terminal Log -->
+                <div class="ct-terminal" style="margin-top: 24px;">
+                    <div class="ct-terminal-titlebar">
+                        <div class="ct-terminal-dots">
+                            <span class="ct-dot ct-dot-red"></span>
+                            <span class="ct-dot ct-dot-yellow"></span>
+                            <span class="ct-dot ct-dot-green"></span>
+                        </div>
+                        <div class="ct-terminal-title">Copy Trader Logs</div>
+                        <div class="ct-terminal-actions">
+                            <label class="ct-autotail-toggle">
+                                <input type="checkbox" id="ctAutoTail" checked onchange="toggleCtAutoTail()">
+                                <span class="ct-autotail-label">Auto-tail</span>
+                            </label>
+                            <button class="ct-terminal-btn" onclick="clearCtLogs()" title="Clear">
+                                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="3 6 5 6 21 6"></polyline>
+                                    <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                                </svg>
+                            </button>
+                        </div>
+                    </div>
+                    <div class="ct-terminal-body" id="ctTerminalBody">
+                        <div class="ct-terminal-line ct-line-muted">Waiting for logs...</div>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Search View -->
+            <div class="view" id="searchView">
+                <div class="view-header">
+                    <h1>Search Markets</h1>
+                    <p class="subtitle">Find and trade any market on Polymarket</p>
+                </div>
+                <div class="search-container">
+                    <div class="search-input-wrapper">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="11" cy="11" r="8"></circle>
+                            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                        </svg>
+                        <input type="text" id="marketSearchInput" class="search-input" placeholder="Search markets (e.g., Trump, Bitcoin, Super Bowl)..." onkeypress="if(event.key === 'Enter') searchMarkets()">
+                        <button class="btn btn-primary" onclick="searchMarkets()">
+                            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <circle cx="11" cy="11" r="8"></circle>
+                                <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                            </svg>
+                            Search
+                        </button>
+                    </div>
+                    <div class="search-filters">
+                        <label class="checkbox-label">
+                            <input type="checkbox" id="searchActiveOnly" checked> Active markets only
+                        </label>
+                        <div class="control-group">
+                            <label>Max Results</label>
+                            <select id="searchLimit" class="select">
+                                <option value="10">10</option>
+                                <option value="25" selected>25</option>
+                                <option value="50">50</option>
+                                <option value="100">100</option>
+                            </select>
+                        </div>
+                    </div>
+                </div>
+                <div class="search-results" id="searchResults">
+                    <div class="empty-state">
+                        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="11" cy="11" r="8"></circle>
+                            <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                        </svg>
+                        <p>Enter a search term to find markets</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Logs View -->
+            <div class="view" id="logsView">
+                <div class="view-header">
+                    <div class="header-row">
+                        <div>
+                            <h1>System Logs</h1>
+                            <p class="subtitle">Real-time activity logs from all components</p>
+                        </div>
+                        <div class="header-actions">
+                            <label class="toggle-label">
+                                <input type="checkbox" id="autoRefreshLogs" checked onchange="toggleAutoRefreshLogs()">
+                                Auto-refresh
+                            </label>
+                            <button class="btn btn-outline" onclick="clearCurrentLogs()">
+                                Clear
+                            </button>
+                            <button class="btn btn-outline" onclick="refreshLogs()">
+                                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <polyline points="23 4 23 10 17 10"></polyline>
+                                    <path d="M20.49 15a9 9 0 1 1-2.12-9.36L23 10"></path>
+                                </svg>
+                                Refresh
+                            </button>
+                        </div>
+                    </div>
+                </div>
+                <!-- Log Channel Tabs -->
+                <div class="log-tabs">
+                    <button class="log-tab active" data-channel="profit_monitor" onclick="switchLogTab('profit_monitor')">
+                        Profit Monitor
+                    </button>
+                    <button class="log-tab" data-channel="scanner" onclick="switchLogTab('scanner')">
+                        Scanner
+                    </button>
+                    <button class="log-tab" data-channel="deep_research" onclick="switchLogTab('deep_research')">
+                        Deep Research
+                    </button>
+                    <button class="log-tab" data-channel="copy_trading" onclick="switchLogTab('copy_trading')">
+                        Copy Trading
+                    </button>
+                    <button class="log-tab" data-channel="system" onclick="switchLogTab('system')">
+                        System
+                    </button>
+                </div>
+                <div class="logs-container" id="logsContainer">
+                    <div class="loading">Loading logs...</div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- Modal -->
+    <div class="modal-overlay" id="modalOverlay" onclick="closeModal()">
+        <div class="modal" onclick="event.stopPropagation()">
+            <div class="modal-header">
+                <h2 id="modalTitle">Modal Title</h2>
+                <button class="modal-close" onclick="closeModal()">&times;</button>
+            </div>
+            <div class="modal-body" id="modalBody"></div>
+        </div>
+    </div>
+
+    <!-- Toast Container -->
+    <div class="toast-container" id="toastContainer"></div>
+
+    <script src="app.js?v=30"></script>
+</body>
+</html>

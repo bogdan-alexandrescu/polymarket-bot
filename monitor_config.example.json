@@ -1,0 +1,44 @@
+{
+  "poll_interval": 5.0,
+  "markets": [
+    {
+      "condition_id": "0x1234...example",
+      "name": "Will Bitcoin reach $100k by end of 2025?",
+      "yes_token_id": "12345678901234567890",
+      "no_token_id": "09876543210987654321",
+      "alerts": [
+        {
+          "outcome": "YES",
+          "threshold": 0.05,
+          "direction": "both",
+          "cooldown": 300
+        },
+        {
+          "outcome": "NO",
+          "threshold": 0.10,
+          "direction": "up",
+          "cooldown": 600
+        }
+      ],
+      "auto_trades": [
+        {
+          "outcome": "YES",
+          "trigger_price": 0.30,
+          "direction": "below",
+          "action": "buy",
+          "amount": 50.0,
+          "limit_price": 0.29,
+          "one_shot": true
+        },
+        {
+          "outcome": "YES",
+          "trigger_price": 0.80,
+          "direction": "above",
+          "action": "sell",
+          "amount": 100.0,
+          "one_shot": true
+        }
+      ]
+    }
+  ]
+}
