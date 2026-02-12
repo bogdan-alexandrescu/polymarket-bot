@@ -1,9 +1,6 @@
 """Configuration for Polymarket trading bot."""
 
 import os
-from dotenv import load_dotenv
-
-load_dotenv()
 
 # Polymarket CLOB API
 CLOB_API_URL = "https://clob.polymarket.com"

@@ -12,9 +12,6 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Optional
 import anthropic
-from dotenv import load_dotenv
-
-load_dotenv()
 
 # Import cache and rate limiter
 from api_cache import get_cache, get_rate_limiter
