@@ -547,11 +547,7 @@ def pm_start():
         if manager.is_monitor_running():
             return jsonify({'success': False, 'error': 'Already running'}), 400
 
-        configs = manager.list_enabled()
-        if not configs:
-            return jsonify({'success': False, 'error': 'No enabled configs'}), 400
-
-        # Start monitor
+        # Start monitor (runs in redeem-only mode if no TP/SL configs)
         import subprocess
         monitor_script = os.path.join(os.path.dirname(__file__), 'profit_monitor.py')
         cmd = f"nohup python -u {monitor_script} > /dev/null 2>&1 &"

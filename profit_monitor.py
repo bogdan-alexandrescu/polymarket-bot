@@ -285,9 +285,20 @@ class ProfitMonitor:
 
         active_configs = {c.id: c for c in configs}
 
-        while self.running and active_configs:
-            # Check for redeemable positions first
+        while self.running:
+            # Check for redeemable positions every cycle
             await self.check_and_redeem()
+
+            if not active_configs:
+                # Redeem-only mode: reload configs in case new ones were added
+                new_configs = self.config_manager.list_enabled()
+                if new_configs:
+                    active_configs = {c.id: c for c in new_configs}
+                    self.log(f"Picked up {len(active_configs)} new config(s)")
+                else:
+                    self.log(f"Redeem-only mode | Next check in {self.check_interval}s")
+                    await asyncio.sleep(self.check_interval)
+                    continue
 
             self.log(f"Scanning {len(active_configs)} positions...")
             self.log("-" * 70)
@@ -396,10 +407,6 @@ class ProfitMonitor:
 
                 self.log("")
 
-            if not active_configs:
-                self.log("All positions closed!")
-                break
-
             self.log(f"Active: {len(active_configs)} | Next check in {self.check_interval}s")
             self.log("=" * 70)
             self.log("")
@@ -437,9 +444,5 @@ if __name__ == "__main__":
     init_tables()
     manager = get_manager()
     configs = manager.list_enabled()
-
-    if not configs:
-        print("No enabled configs found. Use 'python main.py monitor add' to add positions.")
-        sys.exit(1)
 
     asyncio.run(main(configs))
