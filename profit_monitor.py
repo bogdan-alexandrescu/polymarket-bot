@@ -12,7 +12,9 @@ import signal
 import sys
 from datetime import datetime
 from polymarket_client import PolymarketClient
-from monitor_config import get_manager, PositionConfig, LOG_FILE, PID_FILE
+from monitor_config import get_manager, PositionConfig
+from log_manager import get_logger
+from db import init_tables
 
 
 class ProfitMonitor:
@@ -22,19 +24,11 @@ class ProfitMonitor:
         self.check_interval = check_interval
         self.running = True
         self.sold_tokens = set()
+        self.pm_log = get_logger('profit_monitor')
 
     def log(self, msg: str):
-        """Log message to file and stdout."""
-        timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        line = f"[{timestamp}] {msg}"
-        print(line)
-
-        # Also write to log file
-        try:
-            with open(LOG_FILE, 'a') as f:
-                f.write(line + "\n")
-        except:
-            pass
+        """Log message via log_manager."""
+        self.pm_log.info(msg)
 
     def get_full_order_book(self, token_id: str) -> dict:
         """Get the full order book with bids sorted highest-first, asks lowest-first."""
@@ -245,17 +239,12 @@ class ProfitMonitor:
                 return result
 
         # Check Stop Loss - use midpoint price and require reasonable spread
-        # This prevents false triggers on thin/illiquid order books
         if sl_target and midpoint > 0:
-            # Only trigger SL if:
-            # 1. Spread is reasonable (< 50%) - indicates real market activity
-            # 2. Midpoint price is at or below SL target
             if spread < 0.50 and midpoint <= sl_target:
                 result["action"] = "stop_loss"
                 result["details"]["sl_triggered_at"] = best_bid
                 return result
             elif spread >= 0.50:
-                # Market is too thin/illiquid - don't trigger SL
                 result["details"]["sl_skipped_reason"] = f"spread too wide ({spread*100:.1f}%)"
 
         result["action"] = "hold"
@@ -276,7 +265,7 @@ class ProfitMonitor:
             if config.token_id in position_tokens:
                 valid_configs.append(config)
             else:
-                self.log(f"  ⚠️ Removing orphan config: {config.name} (position no longer exists)")
+                self.log(f"  Removing orphan config: {config.name} (position no longer exists)")
                 self.config_manager.delete(config.id)
 
         configs = valid_configs
@@ -321,98 +310,94 @@ class ProfitMonitor:
 
                 if action == "take_profit":
                     tp_info = details.get("tp_info", {})
-                    self.log(f"    🎯 TAKE PROFIT TRIGGERED!")
+                    self.log(f"    TAKE PROFIT TRIGGERED!")
                     self.log(f"       Best bid: {tp_info.get('best_bid', 0)*100:.1f}% >= TP: {tp_target*100:.1f}%")
                     self.log(f"       Executing sell: {config.shares:.2f} shares @ {tp_target*100:.1f}%...")
 
                     result = self.execute_sell(config.token_id, config.shares, tp_target)
                     if result.get("success") or result.get("orderID"):
-                        self.log(f"       ✅ SOLD! Order: {result.get('orderID', 'OK')[:20]}...")
+                        self.log(f"       SOLD! Order: {result.get('orderID', 'OK')[:20]}...")
                         self.sold_tokens.add(config.token_id)
-                        self.config_manager.delete(config_id)  # Remove from persistent storage
+                        self.config_manager.delete(config_id)
                         del active_configs[config_id]
                     else:
                         error_msg = result.get('error', 'Unknown')
-                        self.log(f"       ❌ Sell failed: {error_msg}")
+                        self.log(f"       Sell failed: {error_msg}")
 
-                        # If balance/allowance error, try with actual position size
                         if 'balance' in str(error_msg).lower() or 'allowance' in str(error_msg).lower():
-                            self.log(f"       🔄 Checking actual position size...")
+                            self.log(f"       Checking actual position size...")
                             actual_size = await self.get_actual_position_size(config.token_id)
 
                             if actual_size <= 0:
-                                self.log(f"       ⚠️ Position no longer exists, removing from monitor")
+                                self.log(f"       Position no longer exists, removing from monitor")
                                 self.sold_tokens.add(config.token_id)
-                                self.config_manager.delete(config_id)  # Remove from persistent storage
+                                self.config_manager.delete(config_id)
                                 del active_configs[config_id]
                             elif abs(actual_size - config.shares) > 0.01:
-                                self.log(f"       🔄 Retrying with actual size: {actual_size:.2f} shares...")
+                                self.log(f"       Retrying with actual size: {actual_size:.2f} shares...")
                                 result = self.execute_sell(config.token_id, actual_size, tp_target)
                                 if result.get("success") or result.get("orderID"):
-                                    self.log(f"       ✅ SOLD! Order: {result.get('orderID', 'OK')[:20]}...")
+                                    self.log(f"       SOLD! Order: {result.get('orderID', 'OK')[:20]}...")
                                     self.sold_tokens.add(config.token_id)
-                                    self.config_manager.delete(config_id)  # Remove from persistent storage
+                                    self.config_manager.delete(config_id)
                                     del active_configs[config_id]
                                 else:
-                                    self.log(f"       ❌ Retry failed: {result.get('error', 'Unknown')}")
+                                    self.log(f"       Retry failed: {result.get('error', 'Unknown')}")
 
                 elif action == "stop_loss":
                     sl_price = details.get("sl_triggered_at", 0)
-                    self.log(f"    🛑 STOP LOSS TRIGGERED!")
+                    self.log(f"    STOP LOSS TRIGGERED!")
                     self.log(f"       Best bid ({sl_price*100:.1f}%) <= SL target ({sl_target*100:.1f}%)")
 
-                    # Ensure sell price stays within valid bounds (0.01 to 0.99)
                     sell_price = max(sl_price - 0.001, 0.01)
                     self.log(f"       Executing sell: {config.shares:.2f} shares @ {sell_price*100:.1f}%...")
 
                     result = self.execute_sell(config.token_id, config.shares, sell_price)
                     if result.get("success") or result.get("orderID"):
-                        self.log(f"       ✅ SOLD! Order: {result.get('orderID', 'OK')[:20]}...")
+                        self.log(f"       SOLD! Order: {result.get('orderID', 'OK')[:20]}...")
                         self.sold_tokens.add(config.token_id)
-                        self.config_manager.delete(config_id)  # Remove from persistent storage
+                        self.config_manager.delete(config_id)
                         del active_configs[config_id]
                     else:
                         error_msg = result.get('error', 'Unknown')
-                        self.log(f"       ❌ Sell failed: {error_msg}")
+                        self.log(f"       Sell failed: {error_msg}")
 
-                        # If balance/allowance error, try with actual position size
                         if 'balance' in str(error_msg).lower() or 'allowance' in str(error_msg).lower():
-                            self.log(f"       🔄 Checking actual position size...")
+                            self.log(f"       Checking actual position size...")
                             actual_size = await self.get_actual_position_size(config.token_id)
 
                             if actual_size <= 0:
-                                self.log(f"       ⚠️ Position no longer exists, removing from monitor")
+                                self.log(f"       Position no longer exists, removing from monitor")
                                 self.sold_tokens.add(config.token_id)
-                                self.config_manager.delete(config_id)  # Remove from persistent storage
+                                self.config_manager.delete(config_id)
                                 del active_configs[config_id]
                             elif abs(actual_size - config.shares) > 0.01:
-                                self.log(f"       🔄 Retrying with actual size: {actual_size:.2f} shares...")
+                                self.log(f"       Retrying with actual size: {actual_size:.2f} shares...")
                                 result = self.execute_sell(config.token_id, actual_size, sell_price)
                                 if result.get("success") or result.get("orderID"):
-                                    self.log(f"       ✅ SOLD! Order: {result.get('orderID', 'OK')[:20]}...")
+                                    self.log(f"       SOLD! Order: {result.get('orderID', 'OK')[:20]}...")
                                     self.sold_tokens.add(config.token_id)
-                                    self.config_manager.delete(config_id)  # Remove from persistent storage
+                                    self.config_manager.delete(config_id)
                                     del active_configs[config_id]
                                 else:
-                                    self.log(f"       ❌ Retry failed: {result.get('error', 'Unknown')}")
+                                    self.log(f"       Retry failed: {result.get('error', 'Unknown')}")
 
                 elif action == "already_sold":
-                    self.log(f"    ⏭️ Already sold, skipping")
-                    self.config_manager.delete(config_id)  # Remove from persistent storage
+                    self.log(f"    Already sold, skipping")
+                    self.config_manager.delete(config_id)
                     del active_configs[config_id]
 
                 else:
-                    # Check if SL was skipped due to thin market
                     sl_skip_reason = details.get("sl_skipped_reason")
                     if sl_skip_reason:
-                        self.log(f"    ⏳ Holding (SL check skipped: {sl_skip_reason})")
+                        self.log(f"    Holding (SL check skipped: {sl_skip_reason})")
                     else:
-                        self.log(f"    ⏳ Holding...")
+                        self.log(f"    Holding...")
 
                 self.log("")
 
             if not active_configs:
-                self.log("🎉 All positions closed!")
+                self.log("All positions closed!")
                 break
 
             self.log(f"Active: {len(active_configs)} | Next check in {self.check_interval}s")
@@ -424,23 +409,20 @@ class ProfitMonitor:
         self.log("Monitor stopped.")
 
     def stop(self):
-        """Stop the monitor."""
         self.running = False
 
 
 def handle_signal(signum, frame):
-    """Handle shutdown signals."""
     print("\nReceived shutdown signal, stopping...")
     sys.exit(0)
 
 
 async def main(configs: list[PositionConfig], check_interval: int = 60):
-    """Main entry point."""
-    # Set up signal handlers
     signal.signal(signal.SIGINT, handle_signal)
     signal.signal(signal.SIGTERM, handle_signal)
 
-    # Write PID file
+    init_tables()
+
     manager = get_manager()
     manager.set_monitor_pid(os.getpid())
 
@@ -452,7 +434,7 @@ async def main(configs: list[PositionConfig], check_interval: int = 60):
 
 
 if __name__ == "__main__":
-    # When run directly, load configs from file
+    init_tables()
     manager = get_manager()
     configs = manager.list_enabled()
 

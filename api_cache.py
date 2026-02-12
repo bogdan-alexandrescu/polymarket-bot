@@ -1,19 +1,15 @@
 """
 API Cache - Caching layer for Claude/Anthropic API responses.
 
-Provides file-based caching with configurable TTL to reduce API costs
-and avoid rate limits.
+Uses PostgreSQL as source of truth with an in-memory L1 cache.
 """
 
-import os
-import json
 import hashlib
 import time
 import asyncio
-from pathlib import Path
-from dataclasses import dataclass, asdict
+import json
+from dataclasses import dataclass
 from typing import Optional, Any
-from datetime import datetime, timezone
 
 
 @dataclass
@@ -21,129 +17,57 @@ class CacheEntry:
     """A cached API response."""
     key: str
     data: Any
-    created_at: float  # Unix timestamp
-    expires_at: float  # Unix timestamp
-    cache_type: str  # "facts", "analysis", "deep_research"
+    created_at: float
+    expires_at: float
+    cache_type: str
 
 
 class APICache:
-    """File-based cache for API responses with TTL support."""
+    """DB-backed cache for API responses with in-memory L1 and TTL support."""
 
-    def __init__(
-        self,
-        cache_dir: str = None,
-        default_ttl_seconds: int = 7200,  # 2 hours default
-    ):
-        if cache_dir is None:
-            cache_dir = os.path.join(os.path.dirname(__file__), ".api_cache")
-
-        self.cache_dir = Path(cache_dir)
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
+    def __init__(self, default_ttl_seconds: int = 7200):
         self.default_ttl = default_ttl_seconds
-
-        # In-memory cache for faster access
         self._memory_cache: dict[str, CacheEntry] = {}
 
-        # Load existing cache entries into memory
-        self._load_cache_index()
-
-    def _load_cache_index(self):
-        """Load cache index from disk."""
-        index_file = self.cache_dir / "index.json"
-        if index_file.exists():
-            try:
-                with open(index_file, 'r') as f:
-                    index = json.load(f)
-                    # Only load non-expired entries
-                    now = time.time()
-                    for key, meta in index.items():
-                        if meta.get('expires_at', 0) > now:
-                            self._memory_cache[key] = CacheEntry(
-                                key=key,
-                                data=None,  # Lazy load data
-                                created_at=meta['created_at'],
-                                expires_at=meta['expires_at'],
-                                cache_type=meta.get('cache_type', 'unknown'),
-                            )
-            except (json.JSONDecodeError, KeyError):
-                pass
-
-    def _save_cache_index(self):
-        """Save cache index to disk."""
-        index_file = self.cache_dir / "index.json"
-        index = {}
-        for key, entry in self._memory_cache.items():
-            index[key] = {
-                'created_at': entry.created_at,
-                'expires_at': entry.expires_at,
-                'cache_type': entry.cache_type,
-            }
-        with open(index_file, 'w') as f:
-            json.dump(index, f)
-
     def _get_cache_key(self, cache_type: str, identifier: str) -> str:
-        """Generate a cache key from type and identifier."""
-        # Hash the identifier to create a safe filename
         hash_str = hashlib.md5(identifier.encode()).hexdigest()[:16]
         return f"{cache_type}_{hash_str}"
 
-    def _get_cache_file(self, key: str) -> Path:
-        """Get the file path for a cache entry."""
-        return self.cache_dir / f"{key}.json"
-
-    def get(
-        self,
-        cache_type: str,
-        identifier: str,
-    ) -> Optional[Any]:
-        """
-        Get a cached value if it exists and hasn't expired.
-
-        Args:
-            cache_type: Type of cache (e.g., "facts", "analysis")
-            identifier: Unique identifier (e.g., market question)
-
-        Returns:
-            Cached data or None if not found/expired
-        """
+    def get(self, cache_type: str, identifier: str) -> Optional[Any]:
         key = self._get_cache_key(cache_type, identifier)
+        now = time.time()
 
         # Check memory cache first
         if key in self._memory_cache:
             entry = self._memory_cache[key]
-            if entry.expires_at > time.time():
-                # Load data from disk if not in memory
-                if entry.data is None:
-                    cache_file = self._get_cache_file(key)
-                    if cache_file.exists():
-                        try:
-                            with open(cache_file, 'r') as f:
-                                entry.data = json.load(f)
-                        except (json.JSONDecodeError, IOError):
-                            return None
+            if entry.expires_at > now:
                 return entry.data
             else:
-                # Expired, remove from cache
-                self._remove(key)
+                del self._memory_cache[key]
+
+        # Check DB
+        try:
+            from db import execute
+            row = execute(
+                "SELECT data, expires_at, cache_type FROM api_cache WHERE key = %s AND expires_at > %s",
+                (key, now), fetchone=True,
+            )
+            if row:
+                data = row['data']
+                self._memory_cache[key] = CacheEntry(
+                    key=key,
+                    data=data,
+                    created_at=now,
+                    expires_at=row['expires_at'],
+                    cache_type=row['cache_type'],
+                )
+                return data
+        except Exception:
+            pass
 
         return None
 
-    def set(
-        self,
-        cache_type: str,
-        identifier: str,
-        data: Any,
-        ttl_seconds: int = None,
-    ):
-        """
-        Store a value in the cache.
-
-        Args:
-            cache_type: Type of cache
-            identifier: Unique identifier
-            data: Data to cache (must be JSON serializable)
-            ttl_seconds: Time to live in seconds (uses default if not specified)
-        """
+    def set(self, cache_type: str, identifier: str, data: Any, ttl_seconds: int = None):
         if ttl_seconds is None:
             ttl_seconds = self.default_ttl
 
@@ -158,52 +82,47 @@ class APICache:
             cache_type=cache_type,
         )
 
-        # Save to memory
         self._memory_cache[key] = entry
 
-        # Save to disk
-        cache_file = self._get_cache_file(key)
         try:
-            with open(cache_file, 'w') as f:
-                json.dump(data, f)
-            self._save_cache_index()
-        except IOError as e:
-            print(f"Cache write error: {e}")
-
-    def _remove(self, key: str):
-        """Remove a cache entry."""
-        if key in self._memory_cache:
-            del self._memory_cache[key]
-
-        cache_file = self._get_cache_file(key)
-        if cache_file.exists():
-            try:
-                cache_file.unlink()
-            except IOError:
-                pass
-
-        self._save_cache_index()
+            from db import execute
+            execute(
+                """INSERT INTO api_cache (key, data, cache_type, created_at, expires_at)
+                   VALUES (%s, %s, %s, %s, %s)
+                   ON CONFLICT (key) DO UPDATE SET
+                   data = EXCLUDED.data, cache_type = EXCLUDED.cache_type,
+                   created_at = EXCLUDED.created_at, expires_at = EXCLUDED.expires_at""",
+                (key, json.dumps(data), cache_type, now, now + ttl_seconds),
+            )
+        except Exception:
+            pass
 
     def clear_expired(self):
-        """Remove all expired entries from the cache."""
         now = time.time()
         expired_keys = [
             key for key, entry in self._memory_cache.items()
             if entry.expires_at <= now
         ]
         for key in expired_keys:
-            self._remove(key)
+            del self._memory_cache[key]
+
+        try:
+            from db import execute
+            execute("DELETE FROM api_cache WHERE expires_at < %s", (now,))
+        except Exception:
+            pass
+
         return len(expired_keys)
 
     def clear_all(self):
-        """Clear all cache entries."""
-        for key in list(self._memory_cache.keys()):
-            self._remove(key)
         self._memory_cache.clear()
-        self._save_cache_index()
+        try:
+            from db import execute
+            execute("DELETE FROM api_cache")
+        except Exception:
+            pass
 
     def get_stats(self) -> dict:
-        """Get cache statistics."""
         now = time.time()
         total = len(self._memory_cache)
         expired = sum(1 for e in self._memory_cache.values() if e.expires_at <= now)
@@ -219,7 +138,6 @@ class APICache:
             'valid_entries': valid,
             'expired_entries': expired,
             'by_type': by_type,
-            'cache_dir': str(self.cache_dir),
             'default_ttl_hours': self.default_ttl / 3600,
         }
 
@@ -229,76 +147,60 @@ class RateLimiter:
 
     def __init__(
         self,
-        requests_per_minute: int = 10,  # Reduced from 50 - web search is expensive
-        min_delay_seconds: float = 3.0,  # Increased from 0.5 - more spacing between calls
+        requests_per_minute: int = 10,
+        min_delay_seconds: float = 3.0,
     ):
         self.requests_per_minute = requests_per_minute
         self.min_delay = min_delay_seconds
         self.request_times: list[float] = []
         self._lock = asyncio.Lock()
-        self._rate_limit_until: float = 0  # Timestamp when rate limit expires
-        self._consecutive_rate_limits: int = 0  # Track consecutive rate limit errors
+        self._rate_limit_until: float = 0
+        self._consecutive_rate_limits: int = 0
 
     async def acquire(self):
-        """Wait if necessary to avoid rate limits."""
         async with self._lock:
             now = time.time()
 
-            # Check if we're in a rate-limited cooldown period
             if now < self._rate_limit_until:
                 wait_time = self._rate_limit_until - now
                 print(f"Rate limit cooldown: waiting {wait_time:.1f}s...")
                 await asyncio.sleep(wait_time)
                 now = time.time()
 
-            # Remove requests older than 1 minute
             self.request_times = [t for t in self.request_times if now - t < 60]
 
-            # Check if we're at the limit
             if len(self.request_times) >= self.requests_per_minute:
-                # Wait until the oldest request is more than 1 minute old
                 oldest = self.request_times[0]
-                wait_time = 60 - (now - oldest) + 1.0  # Extra buffer
+                wait_time = 60 - (now - oldest) + 1.0
                 if wait_time > 0:
                     print(f"Rate limit: waiting {wait_time:.1f}s (at {len(self.request_times)}/{self.requests_per_minute} rpm)...")
                     await asyncio.sleep(wait_time)
                     now = time.time()
-                    # Clean up again after waiting
                     self.request_times = [t for t in self.request_times if now - t < 60]
 
-            # Always wait minimum delay between requests
             if self.request_times:
                 last_request = self.request_times[-1]
                 time_since_last = now - last_request
                 if time_since_last < self.min_delay:
                     await asyncio.sleep(self.min_delay - time_since_last)
 
-            # Record this request
             self.request_times.append(time.time())
 
     def report_rate_limit_error(self, retry_after: float = None):
-        """Report that a rate limit error was received from the API."""
         self._consecutive_rate_limits += 1
-
-        # Calculate backoff time based on consecutive errors
-        # 30s, 60s, 120s, 240s... capped at 5 minutes
         base_wait = retry_after if retry_after else 30
         backoff_multiplier = min(2 ** (self._consecutive_rate_limits - 1), 8)
         wait_time = min(base_wait * backoff_multiplier, 300)
-
         self._rate_limit_until = time.time() + wait_time
         print(f"Rate limit reported (#{self._consecutive_rate_limits}). Cooldown for {wait_time:.0f}s")
 
     def report_success(self):
-        """Report a successful API call to reset consecutive rate limit counter."""
         self._consecutive_rate_limits = 0
 
     def is_rate_limited(self) -> bool:
-        """Check if we're currently in a rate-limited state."""
         return time.time() < self._rate_limit_until
 
     def get_stats(self) -> dict:
-        """Get rate limiter statistics."""
         now = time.time()
         recent = [t for t in self.request_times if now - t < 60]
         return {
@@ -317,7 +219,6 @@ _rate_limiter_instance: Optional[RateLimiter] = None
 
 
 def get_cache(ttl_hours: float = 2.0) -> APICache:
-    """Get the global cache instance."""
     global _cache_instance
     if _cache_instance is None:
         _cache_instance = APICache(default_ttl_seconds=int(ttl_hours * 3600))
@@ -325,7 +226,6 @@ def get_cache(ttl_hours: float = 2.0) -> APICache:
 
 
 def get_rate_limiter(requests_per_minute: int = 50) -> RateLimiter:
-    """Get the global rate limiter instance."""
     global _rate_limiter_instance
     if _rate_limiter_instance is None:
         _rate_limiter_instance = RateLimiter(requests_per_minute=requests_per_minute)

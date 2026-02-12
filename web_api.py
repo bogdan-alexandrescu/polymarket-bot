@@ -12,16 +12,16 @@ from flask_cors import CORS
 from functools import wraps
 import os
 from datetime import datetime
-from pathlib import Path
 
 from polymarket_client import PolymarketClient
 from opportunity_scanner import OpportunityScanner
 from scanner_config import ScannerConfig
-from monitor_config import get_manager, LOG_FILE, CONFIG_DIR
-from copy_trading_config import get_ct_manager, CT_LOG_FILE, CT_CONFIG_DIR, CT_DETECTED_TRADES_FILE, CT_EXECUTED_TRADES_FILE
+from monitor_config import get_manager
+from copy_trading_config import get_ct_manager
 from log_manager import log_manager, get_logger
 from scan_history import scan_history
 from api_guard import api_guard
+from db import execute, init_tables
 
 app = Flask(__name__, static_folder='web_ui')
 CORS(app)
@@ -29,49 +29,34 @@ CORS(app)
 # Global client instance
 client = PolymarketClient()
 
-# P&L History file
-PNL_HISTORY_FILE = CONFIG_DIR / "pnl_history.json"
-
-
 def load_pnl_history() -> list:
-    """Load P&L history from file."""
-    if not PNL_HISTORY_FILE.exists():
-        return []
-    try:
-        with open(PNL_HISTORY_FILE, 'r') as f:
-            return json.load(f)
-    except:
-        return []
-
-
-def save_pnl_history(history: list):
-    """Save P&L history to file."""
-    # Keep only last 1000 data points
-    history = history[-1000:]
-    CONFIG_DIR.mkdir(parents=True, exist_ok=True)
-    with open(PNL_HISTORY_FILE, 'w') as f:
-        json.dump(history, f)
+    """Load P&L history from DB."""
+    rows = execute(
+        "SELECT timestamp, pnl, portfolio_value, cash, total FROM pnl_history ORDER BY id DESC LIMIT 1000",
+        fetch=True,
+    )
+    rows.reverse()
+    return rows
 
 
 def record_pnl_point(pnl: float, portfolio_value: float, cash: float):
     """Record a P&L data point."""
-    history = load_pnl_history()
     now = datetime.now()
 
-    # Only record if 5+ minutes since last point (avoid too many points)
-    if history:
-        last_time = datetime.fromisoformat(history[-1]['timestamp'])
+    # Only record if 5+ minutes since last point
+    last = execute(
+        "SELECT timestamp FROM pnl_history ORDER BY id DESC LIMIT 1",
+        fetchone=True,
+    )
+    if last:
+        last_time = datetime.fromisoformat(last['timestamp'])
         if (now - last_time).total_seconds() < 300:
             return
 
-    history.append({
-        'timestamp': now.isoformat(),
-        'pnl': pnl,
-        'portfolio_value': portfolio_value,
-        'cash': cash,
-        'total': portfolio_value + cash,
-    })
-    save_pnl_history(history)
+    execute(
+        "INSERT INTO pnl_history (timestamp, pnl, portfolio_value, cash, total) VALUES (%s,%s,%s,%s,%s)",
+        (now.isoformat(), pnl, portfolio_value, cash, portfolio_value + cash),
+    )
 
 
 def async_route(f):
@@ -569,8 +554,7 @@ def pm_start():
         # Start monitor
         import subprocess
         monitor_script = os.path.join(os.path.dirname(__file__), 'profit_monitor.py')
-        log_file = str(LOG_FILE)
-        cmd = f"nohup python -u {monitor_script} >> {log_file} 2>&1 &"
+        cmd = f"nohup python -u {monitor_script} > /dev/null 2>&1 &"
         subprocess.Popen(cmd, shell=True, start_new_session=True)
 
         import time
@@ -610,22 +594,18 @@ def pm_logs():
     try:
         lines = request.args.get('lines', 50, type=int)
 
-        if not LOG_FILE.exists():
-            return jsonify({'success': True, 'logs': []})
-
-        with open(LOG_FILE, 'r') as f:
-            all_lines = f.readlines()
-            # Deduplicate consecutive lines (monitor outputs twice sometimes)
-            deduped = []
-            prev = None
-            for line in all_lines[-lines*2:]:
-                if line != prev:
-                    deduped.append(line.rstrip())
-                prev = line
+        rows = execute(
+            """SELECT message FROM daemon_logs
+               WHERE channel = 'profit_monitor'
+               ORDER BY id DESC LIMIT %s""",
+            (lines,), fetch=True,
+        )
+        rows.reverse()
+        logs = [r['message'] for r in rows]
 
         return jsonify({
             'success': True,
-            'logs': deduped[-lines:]
+            'logs': logs
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -1509,7 +1489,6 @@ def ct_configs():
     """Get all copy trading configurations."""
     try:
         ct_manager = get_ct_manager()
-        ct_manager.load()  # Reload from disk (daemon may have updated timestamps)
         configs = ct_manager.list_all()
 
         result = []
@@ -1681,9 +1660,7 @@ def ct_start():
         # Start copy trader
         import subprocess
         ct_script = os.path.join(os.path.dirname(__file__), 'copy_trader.py')
-        log_file = str(CT_LOG_FILE)
-        CT_CONFIG_DIR.mkdir(exist_ok=True)
-        cmd = f"nohup python -u {ct_script} >> {log_file} 2>&1 &"
+        cmd = f"nohup python -u {ct_script} > /dev/null 2>&1 &"
         subprocess.Popen(cmd, shell=True, start_new_session=True)
 
         import time
@@ -1721,37 +1698,20 @@ def ct_stop():
 def ct_history():
     """Get recent copy trader logs, parsed for terminal display."""
     try:
-        import re
         lines_count = request.args.get('lines', 150, type=int)
 
-        if not CT_LOG_FILE.exists():
-            return jsonify({'success': True, 'logs': []})
-
-        with open(CT_LOG_FILE, 'r') as f:
-            all_lines = f.readlines()
-
-        # Deduplicate consecutive lines and parse
-        parsed = []
-        prev = None
-        # Pattern: [HH:MM:SS] [COPY_TRADING] message
-        pattern = re.compile(r'^\[(\d{2}:\d{2}:\d{2})\]\s+\[COPY_TRADING\]\s*(.*)')
-
-        for line in all_lines:
-            line = line.rstrip()
-            if not line or line == prev:
-                continue
-            prev = line
-
-            m = pattern.match(line)
-            if m:
-                parsed.append({
-                    'time': m.group(1),
-                    'message': m.group(2),
-                })
+        rows = execute(
+            """SELECT time, message FROM daemon_logs
+               WHERE channel = 'copy_trading'
+               ORDER BY id DESC LIMIT %s""",
+            (lines_count,), fetch=True,
+        )
+        rows.reverse()
+        parsed = [{'time': r['time'], 'message': r['message']} for r in rows]
 
         return jsonify({
             'success': True,
-            'logs': parsed[-lines_count:]
+            'logs': parsed
         })
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -1759,23 +1719,29 @@ def ct_history():
 
 @app.route('/api/ct/detected-trades')
 def ct_detected_trades():
-    """Get detected trades from followed users."""
+    """Get detected trades from followed users (latest run only)."""
     try:
-        if not CT_DETECTED_TRADES_FILE.exists():
-            return jsonify({'success': True, 'trades': [], 'run_timestamp': None})
-        with open(CT_DETECTED_TRADES_FILE, 'r') as f:
-            data = json.load(f)
+        # Get latest run_timestamp
+        latest = execute(
+            "SELECT MAX(run_timestamp) as max_ts FROM detected_trades",
+            fetchone=True,
+        )
+        run_timestamp = latest['max_ts'] if latest else None
 
-        # Support both old (list) and new (dict with run_timestamp) formats
-        if isinstance(data, list):
-            trades = data
-            run_timestamp = None
-        else:
-            trades = data.get('trades', [])
-            run_timestamp = data.get('run_timestamp')
+        if not run_timestamp:
+            return jsonify({'success': True, 'trades': [], 'run_timestamp': None})
+
+        rows = execute(
+            """SELECT handle, profile_name, side, title, outcome, token_id,
+                      price, usdc_size, size, fill_count, timestamp
+               FROM detected_trades WHERE run_timestamp = %s
+               ORDER BY timestamp DESC""",
+            (run_timestamp,), fetch=True,
+        )
+
+        trades = [dict(r) for r in rows]
 
         # Enrich with current prices
-        client = PolymarketClient()
         token_ids = list({t['token_id'] for t in trades if t.get('token_id')})
         price_cache = {}
         for tid in token_ids:
@@ -1791,8 +1757,6 @@ def ct_detected_trades():
             else:
                 t['current_value'] = None
 
-        # Return newest first
-        trades.reverse()
         return jsonify({'success': True, 'trades': trades, 'run_timestamp': run_timestamp})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -1800,23 +1764,29 @@ def ct_detected_trades():
 
 @app.route('/api/ct/executed-trades')
 def ct_executed_trades():
-    """Get executed copy trades."""
+    """Get executed copy trades (latest run only)."""
     try:
-        if not CT_EXECUTED_TRADES_FILE.exists():
-            return jsonify({'success': True, 'trades': [], 'run_timestamp': None})
-        with open(CT_EXECUTED_TRADES_FILE, 'r') as f:
-            data = json.load(f)
+        # Get latest run_timestamp
+        latest = execute(
+            "SELECT MAX(run_timestamp) as max_ts FROM executed_trades",
+            fetchone=True,
+        )
+        run_timestamp = latest['max_ts'] if latest else None
 
-        # Support both old (list) and new (dict with run_timestamp) formats
-        if isinstance(data, list):
-            trades = data
-            run_timestamp = None
-        else:
-            trades = data.get('trades', [])
-            run_timestamp = data.get('run_timestamp')
+        if not run_timestamp:
+            return jsonify({'success': True, 'trades': [], 'run_timestamp': None})
+
+        rows = execute(
+            """SELECT handle, profile_name, side, title, outcome, token_id,
+                      price, usdc_size, size, order_id, timestamp
+               FROM executed_trades WHERE run_timestamp = %s
+               ORDER BY timestamp DESC""",
+            (run_timestamp,), fetch=True,
+        )
+
+        trades = [dict(r) for r in rows]
 
         # Enrich with current prices
-        client = PolymarketClient()
         token_ids = list({t['token_id'] for t in trades if t.get('token_id')})
         price_cache = {}
         for tid in token_ids:
@@ -1832,8 +1802,6 @@ def ct_executed_trades():
             else:
                 t['current_value'] = None
 
-        # Return newest first
-        trades.reverse()
         return jsonify({'success': True, 'trades': trades, 'run_timestamp': run_timestamp})
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)}), 500
@@ -1871,9 +1839,7 @@ def _restart_copy_trader_if_running():
         if configs:
             import subprocess
             ct_script = os.path.join(os.path.dirname(__file__), 'copy_trader.py')
-            log_file = str(CT_LOG_FILE)
-            CT_CONFIG_DIR.mkdir(exist_ok=True)
-            cmd = f"nohup python -u {ct_script} >> {log_file} 2>&1 &"
+            cmd = f"nohup python -u {ct_script} > /dev/null 2>&1 &"
             subprocess.Popen(cmd, shell=True, start_new_session=True)
 
 
@@ -1906,8 +1872,7 @@ def _restart_monitor_if_running(manager):
         if configs:
             import subprocess
             monitor_script = os.path.join(os.path.dirname(__file__), 'profit_monitor.py')
-            log_file = str(LOG_FILE)
-            cmd = f"nohup python -u {monitor_script} >> {log_file} 2>&1 &"
+            cmd = f"nohup python -u {monitor_script} > /dev/null 2>&1 &"
             subprocess.Popen(cmd, shell=True, start_new_session=True)
 
 
@@ -1924,6 +1889,7 @@ def static_files(path):
 
 
 if __name__ == '__main__':
+    init_tables()
     port = int(os.environ.get('PORT', 7070))
     debug = os.environ.get('RAILWAY_ENVIRONMENT') is None  # debug only locally
     app.run(host='0.0.0.0', port=port, debug=debug, threaded=True)

@@ -28,7 +28,8 @@ from monitor import MarketMonitor, TriggerDirection
 from sms_alerts import SMSAlerter
 from opportunity_scanner import OpportunityScanner
 from scanner_config import ScannerConfig
-from monitor_config import get_manager, MonitorConfigManager, LOG_FILE
+from monitor_config import get_manager, MonitorConfigManager
+from db import execute, init_tables
 import config
 import os
 import subprocess
@@ -814,8 +815,7 @@ async def cmd_pm_start(client: PolymarketClient, manager: MonitorConfigManager, 
     monitor_script = os.path.join(os.path.dirname(__file__), 'profit_monitor.py')
 
     # Use nohup to detach
-    log_file = str(LOG_FILE)
-    cmd = f"nohup python -u {monitor_script} >> {log_file} 2>&1 &"
+    cmd = f"nohup python -u {monitor_script} > /dev/null 2>&1 &"
 
     subprocess.Popen(cmd, shell=True, start_new_session=True)
 
@@ -825,13 +825,11 @@ async def cmd_pm_start(client: PolymarketClient, manager: MonitorConfigManager, 
     if manager.is_monitor_running():
         pid = manager.get_monitor_pid()
         print(f"✅ Monitor started (PID: {pid})")
-        print(f"   Log file: {log_file}")
         print(f"   Use 'pm status' to check status")
         print(f"   Use 'pm log' to view logs")
         print(f"   Use 'pm stop' to stop")
     else:
-        print("❌ Failed to start monitor. Check logs:")
-        print(f"   tail -50 {log_file}")
+        print("❌ Failed to start monitor. Use 'pm log' to check logs.")
 
 
 def stop_monitor_sync(manager: MonitorConfigManager, silent: bool = False) -> bool:
@@ -878,8 +876,7 @@ def start_monitor_sync(manager: MonitorConfigManager, silent: bool = False) -> b
         return False
 
     monitor_script = os.path.join(os.path.dirname(__file__), 'profit_monitor.py')
-    log_file = str(LOG_FILE)
-    cmd = f"nohup python -u {monitor_script} >> {log_file} 2>&1 &"
+    cmd = f"nohup python -u {monitor_script} > /dev/null 2>&1 &"
 
     subprocess.Popen(cmd, shell=True, start_new_session=True)
 
@@ -924,16 +921,20 @@ async def cmd_pm_stop(manager: MonitorConfigManager):
 
 async def cmd_pm_log(manager: MonitorConfigManager, args):
     """Show monitor logs."""
-    if not LOG_FILE.exists():
-        print("No log file found.")
-        return
-
     lines = args.lines if hasattr(args, 'lines') else 50
 
-    with open(LOG_FILE, 'r') as f:
-        all_lines = f.readlines()
-        for line in all_lines[-lines:]:
-            print(line.rstrip())
+    rows = execute(
+        """SELECT time, message FROM daemon_logs
+           WHERE channel = 'profit_monitor'
+           ORDER BY id DESC LIMIT %s""",
+        (lines,), fetch=True,
+    )
+    rows.reverse()
+    if not rows:
+        print("No logs found.")
+        return
+    for r in rows:
+        print(f"[{r['time']}] {r['message']}")
 
 
 async def cmd_monitor_interactive(client: PolymarketClient, alerter: SMSAlerter):

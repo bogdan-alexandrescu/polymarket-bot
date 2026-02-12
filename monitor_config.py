@@ -2,29 +2,22 @@
 """
 Monitor Configuration Manager
 
-Handles persistent storage of take-profit (TP) and stop-loss (SL) configurations.
-Stores configs in a local JSON file for the profit monitor to use.
+Handles persistent storage of take-profit (TP) and stop-loss (SL) configurations
+in PostgreSQL.
 """
 
-import json
 import os
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
-from pathlib import Path
 
-# Config file location — use volume mount on Railway, local dir otherwise
-_BASE_DIR = Path(os.environ.get('RAILWAY_VOLUME_MOUNT_PATH', str(Path(__file__).parent)))
-CONFIG_DIR = _BASE_DIR / ".monitor"
-CONFIG_FILE = CONFIG_DIR / "positions.json"
-PID_FILE = CONFIG_DIR / "monitor.pid"
-LOG_FILE = CONFIG_DIR / "monitor.log"
+from db import execute
 
 
 @dataclass
 class PositionConfig:
     """Configuration for a monitored position."""
-    id: str  # Unique config ID
+    id: str
     token_id: str
     name: str
     side: str  # "Yes" or "No"
@@ -32,16 +25,16 @@ class PositionConfig:
     entry_price: float
 
     # Market info
-    description: str = ""  # Market description
-    slug: str = ""  # URL slug for Polymarket link
+    description: str = ""
+    slug: str = ""
 
     # Take profit config (optional)
-    take_profit_pct: Optional[float] = None  # e.g., 0.03 for 3%
-    take_profit_price: Optional[float] = None  # Absolute price
+    take_profit_pct: Optional[float] = None
+    take_profit_price: Optional[float] = None
 
     # Stop loss config (optional)
-    stop_loss_pct: Optional[float] = None  # e.g., 0.05 for 5%
-    stop_loss_price: Optional[float] = None  # Absolute price
+    stop_loss_pct: Optional[float] = None
+    stop_loss_price: Optional[float] = None
 
     # Status
     enabled: bool = True
@@ -51,10 +44,10 @@ class PositionConfig:
     def __post_init__(self):
         if not self.created_at:
             self.created_at = datetime.now().isoformat()
-        self.updated_at = datetime.now().isoformat()
+        if not self.updated_at:
+            self.updated_at = datetime.now().isoformat()
 
     def get_tp_target(self) -> Optional[float]:
-        """Get take profit target price."""
         if self.take_profit_price:
             return self.take_profit_price
         if self.take_profit_pct:
@@ -62,7 +55,6 @@ class PositionConfig:
         return None
 
     def get_sl_target(self) -> Optional[float]:
-        """Get stop loss target price."""
         if self.stop_loss_price:
             return self.stop_loss_price
         if self.stop_loss_pct:
@@ -70,62 +62,45 @@ class PositionConfig:
         return None
 
     def summary(self) -> str:
-        """Return a summary string."""
         tp = self.get_tp_target()
         sl = self.get_sl_target()
-
         tp_str = f"TP: {tp*100:.1f}%" if tp else "TP: -"
         sl_str = f"SL: {sl*100:.1f}%" if sl else "SL: -"
         status = "ON" if self.enabled else "OFF"
-
         return f"[{self.id}] {self.name} ({self.side}) | Entry: {self.entry_price*100:.1f}% | {tp_str} | {sl_str} | {status}"
 
 
+def _row_to_config(row: dict) -> PositionConfig:
+    """Convert a DB row dict to a PositionConfig dataclass."""
+    return PositionConfig(
+        id=row['id'],
+        token_id=row['token_id'],
+        name=row['name'],
+        side=row['side'],
+        shares=row['shares'],
+        entry_price=row['entry_price'],
+        description=row.get('description', ''),
+        slug=row.get('slug', ''),
+        take_profit_pct=row.get('take_profit_pct'),
+        take_profit_price=row.get('take_profit_price'),
+        stop_loss_pct=row.get('stop_loss_pct'),
+        stop_loss_price=row.get('stop_loss_price'),
+        enabled=row['enabled'],
+        created_at=row['created_at'],
+        updated_at=row['updated_at'],
+    )
+
+
 class MonitorConfigManager:
-    """Manages monitor configurations stored in a local file."""
+    """Manages monitor configurations stored in PostgreSQL."""
 
     def __init__(self):
-        self._ensure_config_dir()
-        self.configs: dict[str, PositionConfig] = {}
-        self.load()
-
-    def _ensure_config_dir(self):
-        """Ensure config directory exists."""
-        CONFIG_DIR.mkdir(exist_ok=True)
+        pass
 
     def _generate_id(self) -> str:
-        """Generate a short unique ID."""
         import random
         import string
         return ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
-
-    def load(self) -> dict[str, PositionConfig]:
-        """Load configurations from file."""
-        if not CONFIG_FILE.exists():
-            self.configs = {}
-            return self.configs
-
-        try:
-            with open(CONFIG_FILE, 'r') as f:
-                data = json.load(f)
-
-            self.configs = {}
-            for config_id, config_data in data.items():
-                self.configs[config_id] = PositionConfig(**config_data)
-        except Exception as e:
-            print(f"Error loading config: {e}")
-            self.configs = {}
-
-        return self.configs
-
-    def save(self):
-        """Save configurations to file."""
-        self._ensure_config_dir()
-
-        data = {config_id: asdict(config) for config_id, config in self.configs.items()}
-
-        with open(CONFIG_FILE, 'w') as f:
-            json.dump(data, f, indent=2)
 
     def add(self,
             token_id: str,
@@ -139,17 +114,15 @@ class MonitorConfigManager:
             stop_loss_price: Optional[float] = None,
             description: str = "",
             slug: str = "") -> PositionConfig:
-        """Add a new position config.
-
-        TP/SL can be specified as either percentage or absolute price.
-        Percentages are converted to prices and stored as prices.
-        """
-        config_id = self._generate_id()
-
         # Check if already exists for this token
-        for existing in self.configs.values():
-            if existing.token_id == token_id:
-                raise ValueError(f"Config already exists for this token: {existing.id}")
+        existing = execute(
+            "SELECT id FROM monitor_configs WHERE token_id = %s",
+            (token_id,), fetchone=True,
+        )
+        if existing:
+            raise ValueError(f"Config already exists for this token: {existing['id']}")
+
+        config_id = self._generate_id()
 
         # Convert percentages to prices (store only prices)
         final_tp_price = take_profit_price
@@ -160,6 +133,7 @@ class MonitorConfigManager:
         if stop_loss_pct is not None and final_sl_price is None:
             final_sl_price = entry_price * (1 - stop_loss_pct)
 
+        now = datetime.now().isoformat()
         config = PositionConfig(
             id=config_id,
             token_id=token_id,
@@ -169,26 +143,34 @@ class MonitorConfigManager:
             entry_price=entry_price,
             description=description,
             slug=slug,
-            take_profit_pct=None,  # Don't store percentage
+            take_profit_pct=None,
             take_profit_price=final_tp_price,
-            stop_loss_pct=None,  # Don't store percentage
+            stop_loss_pct=None,
             stop_loss_price=final_sl_price,
+            created_at=now,
+            updated_at=now,
         )
 
-        self.configs[config_id] = config
-        self.save()
+        execute(
+            """INSERT INTO monitor_configs
+               (id, token_id, name, side, shares, entry_price, description, slug,
+                take_profit_pct, take_profit_price, stop_loss_pct, stop_loss_price,
+                enabled, created_at, updated_at)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (config.id, config.token_id, config.name, config.side,
+             config.shares, config.entry_price, config.description, config.slug,
+             config.take_profit_pct, config.take_profit_price,
+             config.stop_loss_pct, config.stop_loss_price,
+             config.enabled, config.created_at, config.updated_at),
+        )
         return config
 
     def update(self, config_id: str, **kwargs) -> PositionConfig:
-        """Update an existing config.
-
-        TP/SL can be specified as either percentage or absolute price.
-        Percentages are converted to prices and stored as prices.
-        """
-        if config_id not in self.configs:
+        row = execute("SELECT * FROM monitor_configs WHERE id = %s", (config_id,), fetchone=True)
+        if not row:
             raise ValueError(f"Config not found: {config_id}")
 
-        config = self.configs[config_id]
+        config = _row_to_config(row)
 
         # Convert TP percentage to price if provided
         if 'take_profit_pct' in kwargs:
@@ -211,64 +193,80 @@ class MonitorConfigManager:
                 setattr(config, key, value)
 
         config.updated_at = datetime.now().isoformat()
-        self.save()
+
+        execute(
+            """UPDATE monitor_configs SET
+               token_id=%s, name=%s, side=%s, shares=%s, entry_price=%s,
+               description=%s, slug=%s,
+               take_profit_pct=%s, take_profit_price=%s,
+               stop_loss_pct=%s, stop_loss_price=%s,
+               enabled=%s, updated_at=%s
+               WHERE id=%s""",
+            (config.token_id, config.name, config.side, config.shares,
+             config.entry_price, config.description, config.slug,
+             config.take_profit_pct, config.take_profit_price,
+             config.stop_loss_pct, config.stop_loss_price,
+             config.enabled, config.updated_at,
+             config_id),
+        )
         return config
 
     def delete(self, config_id: str) -> bool:
-        """Delete a config."""
-        if config_id not in self.configs:
+        row = execute("SELECT id FROM monitor_configs WHERE id = %s", (config_id,), fetchone=True)
+        if not row:
             return False
-
-        del self.configs[config_id]
-        self.save()
+        execute("DELETE FROM monitor_configs WHERE id = %s", (config_id,))
         return True
 
     def get(self, config_id: str) -> Optional[PositionConfig]:
-        """Get a config by ID."""
-        return self.configs.get(config_id)
+        row = execute("SELECT * FROM monitor_configs WHERE id = %s", (config_id,), fetchone=True)
+        return _row_to_config(row) if row else None
 
     def get_by_token(self, token_id: str) -> Optional[PositionConfig]:
-        """Get a config by token ID."""
-        for config in self.configs.values():
-            if config.token_id == token_id:
-                return config
-        return None
+        row = execute("SELECT * FROM monitor_configs WHERE token_id = %s", (token_id,), fetchone=True)
+        return _row_to_config(row) if row else None
 
     def list_all(self) -> list[PositionConfig]:
-        """List all configs."""
-        return list(self.configs.values())
+        rows = execute("SELECT * FROM monitor_configs ORDER BY created_at", fetch=True)
+        return [_row_to_config(r) for r in rows]
 
     def list_enabled(self) -> list[PositionConfig]:
-        """List only enabled configs."""
-        return [c for c in self.configs.values() if c.enabled]
+        rows = execute(
+            "SELECT * FROM monitor_configs WHERE enabled = TRUE ORDER BY created_at",
+            fetch=True,
+        )
+        return [_row_to_config(r) for r in rows]
 
-    # PID file management for monitor process
+    # PID management via daemon_state table
     def get_monitor_pid(self) -> Optional[int]:
-        """Get the PID of the running monitor, if any."""
-        if not PID_FILE.exists():
+        row = execute(
+            "SELECT pid FROM daemon_state WHERE daemon_name = 'profit_monitor'",
+            fetchone=True,
+        )
+        if not row or row['pid'] is None:
             return None
-
+        pid = row['pid']
         try:
-            pid = int(PID_FILE.read_text().strip())
-            # Check if process is actually running
             os.kill(pid, 0)
             return pid
-        except (ValueError, ProcessLookupError, PermissionError):
-            # Process not running, clean up stale PID file
-            PID_FILE.unlink(missing_ok=True)
+        except (ProcessLookupError, PermissionError):
+            self.clear_monitor_pid()
             return None
 
     def set_monitor_pid(self, pid: int):
-        """Set the monitor PID."""
-        self._ensure_config_dir()
-        PID_FILE.write_text(str(pid))
+        execute(
+            """UPDATE daemon_state SET pid = %s, started_at = EXTRACT(EPOCH FROM NOW()),
+               last_heartbeat = EXTRACT(EPOCH FROM NOW())
+               WHERE daemon_name = 'profit_monitor'""",
+            (pid,),
+        )
 
     def clear_monitor_pid(self):
-        """Clear the monitor PID file."""
-        PID_FILE.unlink(missing_ok=True)
+        execute(
+            "UPDATE daemon_state SET pid = NULL WHERE daemon_name = 'profit_monitor'",
+        )
 
     def is_monitor_running(self) -> bool:
-        """Check if monitor is running."""
         return self.get_monitor_pid() is not None
 
 
@@ -276,7 +274,6 @@ class MonitorConfigManager:
 _manager = None
 
 def get_manager() -> MonitorConfigManager:
-    """Get the singleton config manager."""
     global _manager
     if _manager is None:
         _manager = MonitorConfigManager()

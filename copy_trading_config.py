@@ -2,108 +2,68 @@
 """
 Copy Trading Configuration Manager
 
-Handles persistent storage of copy trading configurations.
-Stores configs in a local JSON file for the copy trader daemon to use.
+Handles persistent storage of copy trading configurations in PostgreSQL.
 """
 
-import json
 import os
-from dataclasses import dataclass, asdict
+from dataclasses import dataclass
 from datetime import datetime
 from typing import Optional
-from pathlib import Path
 
-# Config file location — use volume mount on Railway, local dir otherwise
-_BASE_DIR = Path(os.environ.get('RAILWAY_VOLUME_MOUNT_PATH', str(Path(__file__).parent)))
-CT_CONFIG_DIR = _BASE_DIR / ".copy_trading"
-CT_CONFIG_FILE = CT_CONFIG_DIR / "configs.json"
-CT_PID_FILE = CT_CONFIG_DIR / "copy_trader.pid"
-CT_LOG_FILE = CT_CONFIG_DIR / "copy_trader.log"
-CT_DETECTED_TRADES_FILE = CT_CONFIG_DIR / "detected_trades.json"
-CT_EXECUTED_TRADES_FILE = CT_CONFIG_DIR / "executed_trades.json"
+from db import execute
 
 
 @dataclass
 class CopyTraderConfig:
     """Configuration for a followed trader."""
-    id: str  # Unique config ID (6 chars)
-    handle: str  # Polymarket username (e.g., planktonXD)
-    wallet_address: str  # Resolved wallet address
-    profile_name: str  # Display name from profile
-
-    # Sizing configuration
-    max_amount: float = 5.0  # Max copy amount ($). Trades under this are copied at exact size.
-    extra_pct: float = 0.10  # Extra % of original added when trade exceeds max (e.g. 0.10 = 10%)
-
-    # Legacy fields (kept for backwards compat with existing configs)
-    sizing_mode: str = ""
-    fixed_amount: float = 0.0
-    percentage: float = 0.0
-
-    # Status
+    id: str
+    handle: str
+    wallet_address: str
+    profile_name: str
+    max_amount: float = 5.0
+    extra_pct: float = 0.10
     enabled: bool = True
     created_at: str = ""
     updated_at: str = ""
-
-    # Tracking
-    last_check_timestamp: Optional[float] = None  # Unix timestamp of last activity check
+    last_check_timestamp: Optional[float] = None
 
     def __post_init__(self):
         if not self.created_at:
             self.created_at = datetime.now().isoformat()
-        self.updated_at = datetime.now().isoformat()
+        if not self.updated_at:
+            self.updated_at = datetime.now().isoformat()
 
     def summary(self) -> str:
-        """Return a summary string."""
         status = "ON" if self.enabled else "OFF"
         return f"[{self.id}] @{self.handle} ({self.profile_name}) | max ${self.max_amount:.0f} +{self.extra_pct*100:.0f}% | {status}"
 
 
+def _row_to_config(row: dict) -> CopyTraderConfig:
+    """Convert a DB row dict to a CopyTraderConfig dataclass."""
+    return CopyTraderConfig(
+        id=row['id'],
+        handle=row['handle'],
+        wallet_address=row['wallet_address'],
+        profile_name=row['profile_name'],
+        max_amount=row['max_amount'],
+        extra_pct=row['extra_pct'],
+        enabled=row['enabled'],
+        created_at=row['created_at'],
+        updated_at=row['updated_at'],
+        last_check_timestamp=row.get('last_check_timestamp'),
+    )
+
+
 class CopyTradingConfigManager:
-    """Manages copy trading configurations stored in a local file."""
+    """Manages copy trading configurations stored in PostgreSQL."""
 
     def __init__(self):
-        self._ensure_config_dir()
-        self.configs: dict[str, CopyTraderConfig] = {}
-        self.load()
-
-    def _ensure_config_dir(self):
-        """Ensure config directory exists."""
-        CT_CONFIG_DIR.mkdir(exist_ok=True)
+        pass
 
     def _generate_id(self) -> str:
-        """Generate a short unique ID."""
         import random
         import string
         return ''.join(random.choices(string.ascii_lowercase + string.digits, k=6))
-
-    def load(self) -> dict[str, CopyTraderConfig]:
-        """Load configurations from file."""
-        if not CT_CONFIG_FILE.exists():
-            self.configs = {}
-            return self.configs
-
-        try:
-            with open(CT_CONFIG_FILE, 'r') as f:
-                data = json.load(f)
-
-            self.configs = {}
-            for config_id, config_data in data.items():
-                self.configs[config_id] = CopyTraderConfig(**config_data)
-        except Exception as e:
-            print(f"Error loading copy trading config: {e}")
-            self.configs = {}
-
-        return self.configs
-
-    def save(self):
-        """Save configurations to file."""
-        self._ensure_config_dir()
-
-        data = {config_id: asdict(config) for config_id, config in self.configs.items()}
-
-        with open(CT_CONFIG_FILE, 'w') as f:
-            json.dump(data, f, indent=2)
 
     def add(self,
             handle: str,
@@ -112,13 +72,16 @@ class CopyTradingConfigManager:
             max_amount: float = 5.0,
             extra_pct: float = 0.10,
             **kwargs) -> CopyTraderConfig:
-        """Add a new copy trader config."""
-        config_id = self._generate_id()
-
         # Check if already following this wallet
-        for existing in self.configs.values():
-            if existing.wallet_address.lower() == wallet_address.lower():
-                raise ValueError(f"Already following this trader: {existing.handle} ({existing.id})")
+        existing = execute(
+            "SELECT id, handle FROM copy_trading_configs WHERE LOWER(wallet_address) = LOWER(%s)",
+            (wallet_address,), fetchone=True,
+        )
+        if existing:
+            raise ValueError(f"Already following this trader: {existing['handle']} ({existing['id']})")
+
+        config_id = self._generate_id()
+        now = datetime.now().isoformat()
 
         config = CopyTraderConfig(
             id=config_id,
@@ -127,75 +90,98 @@ class CopyTradingConfigManager:
             profile_name=profile_name,
             max_amount=max_amount,
             extra_pct=extra_pct,
+            created_at=now,
+            updated_at=now,
         )
 
-        self.configs[config_id] = config
-        self.save()
+        execute(
+            """INSERT INTO copy_trading_configs
+               (id, handle, wallet_address, profile_name, max_amount, extra_pct,
+                enabled, created_at, updated_at, last_check_timestamp)
+               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)""",
+            (config.id, config.handle, config.wallet_address, config.profile_name,
+             config.max_amount, config.extra_pct, config.enabled,
+             config.created_at, config.updated_at, config.last_check_timestamp),
+        )
         return config
 
     def update(self, config_id: str, **kwargs) -> CopyTraderConfig:
-        """Update an existing config."""
-        if config_id not in self.configs:
+        row = execute("SELECT * FROM copy_trading_configs WHERE id = %s", (config_id,), fetchone=True)
+        if not row:
             raise ValueError(f"Config not found: {config_id}")
 
-        config = self.configs[config_id]
-
+        config = _row_to_config(row)
         for key, value in kwargs.items():
             if hasattr(config, key):
                 setattr(config, key, value)
 
         config.updated_at = datetime.now().isoformat()
-        self.save()
+
+        execute(
+            """UPDATE copy_trading_configs SET
+               handle=%s, wallet_address=%s, profile_name=%s,
+               max_amount=%s, extra_pct=%s, enabled=%s,
+               updated_at=%s, last_check_timestamp=%s
+               WHERE id=%s""",
+            (config.handle, config.wallet_address, config.profile_name,
+             config.max_amount, config.extra_pct, config.enabled,
+             config.updated_at, config.last_check_timestamp,
+             config_id),
+        )
         return config
 
     def delete(self, config_id: str) -> bool:
-        """Delete a config."""
-        if config_id not in self.configs:
+        row = execute("SELECT id FROM copy_trading_configs WHERE id = %s", (config_id,), fetchone=True)
+        if not row:
             return False
-
-        del self.configs[config_id]
-        self.save()
+        execute("DELETE FROM copy_trading_configs WHERE id = %s", (config_id,))
         return True
 
     def get(self, config_id: str) -> Optional[CopyTraderConfig]:
-        """Get a config by ID."""
-        return self.configs.get(config_id)
+        row = execute("SELECT * FROM copy_trading_configs WHERE id = %s", (config_id,), fetchone=True)
+        return _row_to_config(row) if row else None
 
     def list_all(self) -> list[CopyTraderConfig]:
-        """List all configs."""
-        return list(self.configs.values())
+        rows = execute("SELECT * FROM copy_trading_configs ORDER BY created_at", fetch=True)
+        return [_row_to_config(r) for r in rows]
 
     def list_enabled(self) -> list[CopyTraderConfig]:
-        """List only enabled configs."""
-        return [c for c in self.configs.values() if c.enabled]
+        rows = execute(
+            "SELECT * FROM copy_trading_configs WHERE enabled = TRUE ORDER BY created_at",
+            fetch=True,
+        )
+        return [_row_to_config(r) for r in rows]
 
-    # PID file management for copy trader process
+    # PID management via daemon_state table
     def get_pid(self) -> Optional[int]:
-        """Get the PID of the running copy trader, if any."""
-        if not CT_PID_FILE.exists():
+        row = execute(
+            "SELECT pid FROM daemon_state WHERE daemon_name = 'copy_trader'",
+            fetchone=True,
+        )
+        if not row or row['pid'] is None:
             return None
-
+        pid = row['pid']
         try:
-            pid = int(CT_PID_FILE.read_text().strip())
-            # Check if process is actually running
             os.kill(pid, 0)
             return pid
-        except (ValueError, ProcessLookupError, PermissionError):
-            # Process not running, clean up stale PID file
-            CT_PID_FILE.unlink(missing_ok=True)
+        except (ProcessLookupError, PermissionError):
+            self.clear_pid()
             return None
 
     def set_pid(self, pid: int):
-        """Set the copy trader PID."""
-        self._ensure_config_dir()
-        CT_PID_FILE.write_text(str(pid))
+        execute(
+            """UPDATE daemon_state SET pid = %s, started_at = EXTRACT(EPOCH FROM NOW()),
+               last_heartbeat = EXTRACT(EPOCH FROM NOW())
+               WHERE daemon_name = 'copy_trader'""",
+            (pid,),
+        )
 
     def clear_pid(self):
-        """Clear the copy trader PID file."""
-        CT_PID_FILE.unlink(missing_ok=True)
+        execute(
+            "UPDATE daemon_state SET pid = NULL WHERE daemon_name = 'copy_trader'",
+        )
 
     def is_running(self) -> bool:
-        """Check if copy trader is running."""
         return self.get_pid() is not None
 
 
@@ -203,7 +189,6 @@ class CopyTradingConfigManager:
 _ct_manager = None
 
 def get_ct_manager() -> CopyTradingConfigManager:
-    """Get the singleton copy trading config manager."""
     global _ct_manager
     if _ct_manager is None:
         _ct_manager = CopyTradingConfigManager()
